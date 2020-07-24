@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use livesplit_hotkey::{Hook, Key, KeyCode};
-use parking_lot::Mutex;
+use parking_lot::FairMutex;
 
 const CONTROLS: [KeyCode; 5] =
     [KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down, KeyCode::Space];
@@ -30,7 +30,8 @@ fn to_enigo(key: KeyCode) -> enigo::Key {
 
 fn replay(enigo: &mut Enigo, actions: &[Action]) {
     println!("========================Replay in progress========================");
-    for action in actions {
+    //first element is sleep(), so we skip it
+    for action in actions.iter().skip(1) {
         println!("executing {:?}", action);
         match *action {
             Action::Sleep(d) => std::thread::sleep(d),
@@ -38,26 +39,20 @@ fn replay(enigo: &mut Enigo, actions: &[Action]) {
             Action::KeyRelease(key) => enigo.key_up(to_enigo(key)),
         }
     }
-    clear(enigo);
     println!("========================Replay is done========================");
-}
-
-fn clear(enigo: &mut Enigo) {
-    CONTROLS.iter().for_each(|&key| {
-        enigo.key_up(to_enigo(key));
-    });
 }
 
 fn register(
     hook: &Hook,
     keys: &[KeyCode],
     mode: fn(KeyCode) -> Key,
-    closure: impl FnMut(KeyCode) + Send + Clone + 'static,
+    action: fn(KeyCode) -> Action,
+    closure: impl FnMut(Action) + Send + Clone + 'static,
 ) {
     for &key in keys {
         hook.register(mode(key), {
             let mut closure = closure.clone();
-            move || closure(key)
+            move || closure(action(key))
         })
         .unwrap();
     }
@@ -72,12 +67,12 @@ struct SharedState {
 }
 
 fn main() {
-    let state = Arc::new(Mutex::new(SharedState::default()));
+    let state = Arc::new(FairMutex::new(SharedState::default()));
     let common_time = Arc::new(Instant::now());
 
     let hook = Hook::new().unwrap();
 
-    register(&hook, &CONTROLS, Key::Press, {
+    let get_callback = || {
         let state = Arc::clone(&state);
         let common_time = Arc::clone(&common_time);
 
@@ -85,30 +80,15 @@ fn main() {
             let SharedState { ref mut last_update, ref mut actions, .. } = &mut *state.lock();
             let elapsed = common_time.elapsed();
 
-            if actions.len() > 1 {
-                actions.push(Action::Sleep(elapsed - *last_update));
-            }
-
-            actions.push(Action::KeyPress(k));
+            actions.extend_from_slice(&[Action::Sleep(elapsed - *last_update), k]);
             *last_update = elapsed;
         }
-    });
+    };
 
-    register(&hook, &CONTROLS, Key::Release, {
-        let state = Arc::clone(&state);
-        let common_time = Arc::clone(&common_time);
+    register(&hook, &CONTROLS, Key::Press, Action::KeyPress, get_callback());
+    register(&hook, &CONTROLS, Key::Release, Action::KeyRelease, get_callback());
 
-        move |k| {
-            let SharedState { ref mut last_update, ref mut actions, .. } = &mut *state.lock();
-            let elapsed = common_time.elapsed();
-
-            actions.push(Action::Sleep(elapsed - *last_update));
-            *last_update = elapsed;
-            actions.push(Action::KeyRelease(k));
-        }
-    });
-
-    //ResetSave
+    //ResetSave - after every replay this should be initiated
     hook.register(Key::Press(KeyCode::F1), {
         let state = Arc::clone(&state);
 
