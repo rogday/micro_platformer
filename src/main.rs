@@ -132,8 +132,10 @@ fn main() {
     //Replay
     hook.register(Key::Press(KeyCode::F3), {
         let state = Arc::clone(&state);
+
         move || {
             let SharedState { saves, ref mut enigo, .. } = &mut *state.lock();
+
             println!("{:?}", saves);
             replay(enigo, &saves.last().unwrap());
         }
