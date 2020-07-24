@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 use livesplit_hotkey::{Hook, Key, KeyCode};
 use parking_lot::Mutex;
 
+const CONTROLS: [KeyCode; 5] =
+    [KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down, KeyCode::Space];
+
 #[derive(Debug, Clone)]
 enum Action {
     Sleep(std::time::Duration),
@@ -26,6 +29,7 @@ fn to_enigo(key: KeyCode) -> enigo::Key {
 }
 
 fn replay(enigo: &mut Enigo, actions: &[Action]) {
+    println!("========================Replay in progress========================");
     for action in actions {
         println!("executing {:?}", action);
         match *action {
@@ -35,13 +39,12 @@ fn replay(enigo: &mut Enigo, actions: &[Action]) {
         }
     }
     clear(enigo);
+    println!("========================Replay is done========================");
 }
 
 fn clear(enigo: &mut Enigo) {
-    use enigo::Key::*;
-
-    [UpArrow, DownArrow, LeftArrow, RightArrow, Space].iter().for_each(|&key| {
-        enigo.key_up(key);
+    CONTROLS.iter().for_each(|&key| {
+        enigo.key_up(to_enigo(key));
     });
 }
 
@@ -60,102 +63,79 @@ fn register(
     }
 }
 
+#[derive(Default)]
+struct SharedState {
+    saves:       Vec<Vec<Action>>,
+    actions:     Vec<Action>,
+    last_update: Duration,
+    enigo:       Enigo,
+}
+
 fn main() {
-    let enigo = Arc::new(Mutex::new(Enigo::new()));
-
-    //TODO: common_state to avoid deadlocks
-    let saves: Arc<Mutex<Vec<Vec<Action>>>> = Arc::new(Mutex::new(Vec::new()));
-    let keys: Arc<Mutex<Vec<Action>>> = Arc::new(Mutex::new(Vec::new()));
-    let last_time = Arc::new(Mutex::new(Duration::from_millis(0)));
-
+    let state = Arc::new(Mutex::new(SharedState::default()));
     let common_time = Arc::new(Instant::now());
 
     let hook = Hook::new().unwrap();
 
-    register(
-        &hook,
-        &[KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down, KeyCode::Space],
-        Key::Press,
-        {
-            let common_time = Arc::clone(&common_time);
-            let last_time = Arc::clone(&last_time);
-            let keys = Arc::clone(&keys);
+    register(&hook, &CONTROLS, Key::Press, {
+        let state = Arc::clone(&state);
+        let common_time = Arc::clone(&common_time);
 
-            move |k| {
-                //DEADLOCK
-                let mut last_time = last_time.lock();
-                let mut keys = keys.lock();
+        move |k| {
+            let SharedState { ref mut last_update, ref mut actions, .. } = &mut *state.lock();
+            let elapsed = common_time.elapsed();
 
-                let elapsed = common_time.elapsed();
-
-                if keys.len() > 1 {
-                    keys.push(Action::Sleep(elapsed - *last_time));
-                }
-
-                keys.push(Action::KeyPress(k));
-
-                *last_time = elapsed;
+            if actions.len() > 1 {
+                actions.push(Action::Sleep(elapsed - *last_update));
             }
-        },
-    );
 
-    register(
-        &hook,
-        &[KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down, KeyCode::Space],
-        Key::Release,
-        {
-            let common_time = Arc::clone(&common_time);
-            let last_time = Arc::clone(&last_time);
-            let keys = Arc::clone(&keys);
+            actions.push(Action::KeyPress(k));
+            *last_update = elapsed;
+        }
+    });
 
-            move |k| {
-                let mut last_time = last_time.lock();
-                let mut keys = keys.lock();
+    register(&hook, &CONTROLS, Key::Release, {
+        let state = Arc::clone(&state);
+        let common_time = Arc::clone(&common_time);
 
-                let elapsed = common_time.elapsed();
+        move |k| {
+            let SharedState { ref mut last_update, ref mut actions, .. } = &mut *state.lock();
+            let elapsed = common_time.elapsed();
 
-                keys.push(Action::Sleep(elapsed - *last_time));
-
-                *last_time = elapsed;
-                keys.push(Action::KeyRelease(k));
-            }
-        },
-    );
+            actions.push(Action::Sleep(elapsed - *last_update));
+            *last_update = elapsed;
+            actions.push(Action::KeyRelease(k));
+        }
+    });
 
     //ResetSave
     hook.register(Key::Press(KeyCode::F1), {
-        let keys = Arc::clone(&keys);
+        let state = Arc::clone(&state);
 
-        move || keys.lock().clear()
+        move || state.lock().actions.clear()
     })
     .unwrap();
 
     //Save
     hook.register(Key::Press(KeyCode::F2), {
-        let saves = Arc::clone(&saves);
-        let keys = Arc::clone(&keys);
+        let state = Arc::clone(&state);
 
         move || {
-            let mut saves = saves.lock();
-            let mut keys = keys.lock();
+            let SharedState { ref mut saves, ref mut actions, .. } = &mut *state.lock();
 
-            saves.push(keys.clone());
-            keys.clear();
+            saves.push(actions.clone());
+            actions.clear();
         }
     })
     .unwrap();
 
     //Replay
     hook.register(Key::Press(KeyCode::F3), {
-        let enigo = Arc::clone(&enigo);
-        let saves = Arc::clone(&saves);
-
+        let state = Arc::clone(&state);
         move || {
-            let mut enigo = enigo.lock();
-            let saves = saves.lock();
-
+            let SharedState { saves, ref mut enigo, .. } = &mut *state.lock();
             println!("{:?}", saves);
-            replay(&mut enigo, &saves.last().unwrap());
+            replay(enigo, &saves.last().unwrap());
         }
     })
     .unwrap();

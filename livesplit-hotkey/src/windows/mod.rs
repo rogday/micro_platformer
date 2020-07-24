@@ -73,8 +73,8 @@ unsafe extern "system" fn callback_proc(code: c_int, wparam: WPARAM, lparam: LPA
         let state = state.as_mut().expect("State should be initialized by now");
 
         if code >= 0 {
-            let key_code: KeyCode =
-                mem::transmute((*(lparam as *const KBDLLHOOKSTRUCT)).vkCode as u8);
+            let lparam: &KBDLLHOOKSTRUCT = &*(lparam as *const KBDLLHOOKSTRUCT);
+            let key_code: KeyCode = mem::transmute(lparam.vkCode as u8);
             let event = wparam as UINT;
 
             //WM_KEYUP works perfectly
